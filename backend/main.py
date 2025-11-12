@@ -22,6 +22,16 @@ class ChatRequest(BaseModel):
     message: str
     history: list = []
 
+# @app.post("/chat")
+# def chat(req: ChatRequest):
+#     return agents.handle_user_message(req.message, req.history)
+
+
+class ChatRequest(BaseModel):
+    message: str
+    history: list = []
+    session_id: str | None = None   # <--- add this
+
 @app.post("/chat")
 def chat(req: ChatRequest):
     return agents.handle_user_message(req.message, req.history)

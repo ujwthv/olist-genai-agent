@@ -16,26 +16,19 @@
 #     return raw.strip() if raw else "gemini-1.5-flash"
 
 # GEMINI_MODEL = _normalize_gemini_model(os.getenv("GEMINI_MODEL"))
-
-# # make Gemini fast – it’s failing on model name anyway
 # GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", "1.5"))
 
 # def _normalize_openrouter_model(raw: str | None) -> str:
-#     """
-#     Your .env had:
-#       OPENROUTER_MODEL=meta-llama/llama-3.1-70b-instruct
-#     That is too slow for a 12s roundtrip. We auto-downsize to a smaller default.
-#     """
 #     if not raw:
 #         return "google/gemma-2-9b-it"
 #     low = raw.lower()
+#     # auto-downsize huge models so we don't blow streamlit's 12s
 #     if "70b" in low or "405b" in low or "72b" in low:
-#         # override to something we can actually get in a few seconds
 #         return "google/gemma-2-9b-it"
 #     return raw.strip()
 
 # OPENROUTER_MODEL = _normalize_openrouter_model(os.getenv("OPENROUTER_MODEL"))
-# OPENROUTER_TIMEOUT = float(os.getenv("OPENROUTER_TIMEOUT", "4.0"))  # must fit under Streamlit 12s
+# OPENROUTER_TIMEOUT = float(os.getenv("OPENROUTER_TIMEOUT", "4.0"))
 
 # def get_gemini_key():
 #     return os.getenv("GEMINI_API_KEY")
@@ -45,7 +38,7 @@
 
 
 # # =========================================================
-# # HELPERS
+# # GENERIC HELPERS
 # # =========================================================
 
 # def rows_to_jsonable(rows):
@@ -65,29 +58,34 @@
 
 # def relax_overstrict_date_filter(user_message: str, sql: str) -> str:
 #     """
-#     Gemini sometimes generates:
-#       WHERE o.order_purchase_timestamp = (SELECT last_order_date FROM last_order)
-#     which returns 0 rows. We strip those.
+#     LLMs often generate filters like:
+#       WHERE o.order_purchase_timestamp = (SELECT max(...) FROM orders)
+#     or
+#       WHERE ... = (SELECT last_order_date FROM last_order)
+#     which returns 0 rows on Olist. Strip them unless the user explicitly asked
+#     for "today/recent/past/last".
 #     """
 #     if not sql:
 #         return sql
 
-#     # original pattern (MAX(...) FROM orders)
+#     m = user_message.lower()
+#     wants_recent = any(x in m for x in ["today", "recent", "latest", "last", "past", "90 days", "quarter"])
+#     if wants_recent:
+#         return sql
+
+#     # drop exact-timestamp filters
 #     sql = re.sub(
 #         r"WHERE\s+[A-Za-z0-9_]+\.\s*order_purchase_timestamp\s*=\s*\(SELECT\s+MAX\(order_purchase_timestamp\)\s+FROM\s+orders\)",
 #         "",
 #         sql,
 #         flags=re.IGNORECASE,
 #     )
-#     # new pattern (SELECT last_order_date FROM last_order)
 #     sql = re.sub(
 #         r"WHERE\s+[A-Za-z0-9_]+\.\s*order_purchase_timestamp\s*=\s*\(SELECT\s+last_order_date\s+FROM\s+last_order\)",
 #         "",
 #         sql,
 #         flags=re.IGNORECASE,
 #     )
-
-#     # clean leftover AND
 #     sql = re.sub(r"\s+AND\s+GROUP BY", " GROUP BY", sql, flags=re.IGNORECASE)
 #     sql = re.sub(r"\s+AND\s+ORDER BY", " ORDER BY", sql, flags=re.IGNORECASE)
 #     return sql
@@ -221,52 +219,56 @@
 #     (SELECT revenue FROM last3) AS last_3_months_revenue,
 #     (SELECT revenue FROM prev3) AS previous_3_months_revenue;
 # """.strip()
-
-
 # # =========================================================
-# # INTENT
+# # INTENT (fixed)
 # # =========================================================
+
+# ANALYTIC_HINTS = [
+#     " per ", " by ", " group", "average", "avg", "sum", "count", "top", "highest",
+#     "last ", "past ", "quarter", "month", "revenue", "orders", "delivery", "delay",
+#     "which ", "in the last", "customers", "seller", "payment", "review", "score",
+#     "%", "percent", "percentage"
+# ]
+
+# def looks_analytic(message: str) -> bool:
+#     m = message.lower()
+#     if len(m.split()) > 6:
+#         return True
+#     return any(h in m for h in ANALYTIC_HINTS)
 
 # def detect_intent(message: str) -> str:
 #     m = message.lower().strip()
-#     if m.startswith("what is") or m.startswith("what’s") or "definition of" in m:
+
+#     # normalize apostrophes so "what’s" and "what's" behave the same
+#     m = m.replace("’", "'")
+
+#     # if it starts with "what" AND looks analytic → go to SQL
+#     if m.startswith("what") and looks_analytic(m):
+#         return "sql_query"
+
+#     if m.startswith("what is") or m.startswith("what's") or "definition of" in m:
 #         return "definition"
+
 #     if m.startswith("translate") or "translate to " in m or "translation:" in m:
 #         return "translate"
+
 #     if "where is my order" in m or "track order" in m:
 #         return "track_order"
+
 #     return "sql_query"
 
 
+
 # # =========================================================
-# # TRANSLATION (kept same idea)
+# # DEFINITION HELPERS (LLM-backed)
 # # =========================================================
+# def extract_definition_term(message: str) -> str:
+#     m = message.strip().lower().replace("’", "'")
+#     m = re.sub(r"^what\s+is\s+", "", m)
+#     m = re.sub(r"^what's\s+", "", m)
+#     m = re.sub(r"^definition of\s+", "", m)
+#     return m.strip(" ?.")
 
-# def extract_translation_target_and_text(message: str):
-#     text = message.strip()
-#     target_lang = "Hindi"
-#     to_translate = text
-
-#     if text.lower().startswith("translate to "):
-#         rest = text[len("translate to ") :].strip()
-#         if ":" in rest:
-#             lang_part, txt = rest.split(":", 1)
-#             target_lang = lang_part.strip()
-#             to_translate = txt.strip()
-#         else:
-#             parts = rest.split(" ", 1)
-#             target_lang = parts[0].strip()
-#             to_translate = parts[1].strip() if len(parts) > 1 else ""
-#     elif text.lower().startswith("translate "):
-#         to_translate = text[len("translate ") :].strip()
-
-#     low = target_lang.lower()
-#     if low in ("mandrian", "mandarin"):
-#         target_lang = "Mandarin Chinese"
-#     if low in ("pt", "pt-br", "brazilian portuguese"):
-#         target_lang = "Portuguese (Brazil)"
-
-#     return target_lang, to_translate
 
 
 # def _gemini_generate_content(base_url: str, model: str, key: str, prompt: str, timeout: float):
@@ -277,24 +279,10 @@
 #     r = requests.post(url, headers=headers, params=params, data=json.dumps(body), timeout=timeout)
 #     return r.json()
 
-# def extract_definition_term(message: str) -> str:
-#     m = message.strip().lower()
-#     # remove "what is", "what's", "definition of"
-#     m = re.sub(r"^what\s+is\s+", "", m)
-#     m = re.sub(r"^what's\s+", "", m)
-#     m = re.sub(r"^definition of\s+", "", m)
-#     return m.strip(" ?.")
 
 # def call_llm_for_definition(term: str, original_message: str) -> str | None:
-#     """
-#     Try Gemini first (v1 -> v1beta), then OpenRouter.
-#     Return plain text, not JSON.
-#     """
 #     prompt = f"""
-# You are an e-commerce / data analytics assistant familiar with the Brazilian Olist dataset (orders, customers, order_items_enriched, payments, reviews).
-
-# Explain the term below in <= 120 words, in plain English, so an analyst understands it.
-# If it is not really an Olist column, explain what it would usually mean in an e-commerce context.
+# Explain the term below in <= 120 words, in plain English, as it would relate to an e-commerce / Olist dataset (orders, customers, payments, reviews). If the term is not an actual Olist column, explain its usual meaning in e-commerce.
 
 # TERM: "{term}"
 # USER ASKED: "{original_message}"
@@ -328,12 +316,7 @@
 #                 ],
 #                 "temperature": 0.0,
 #             }
-#             r = requests.post(
-#                 url,
-#                 headers=headers,
-#                 data=json.dumps(body),
-#                 timeout=OPENROUTER_TIMEOUT,
-#             )
+#             r = requests.post(url, headers=headers, data=json.dumps(body), timeout=OPENROUTER_TIMEOUT)
 #             j = r.json()
 #             return j["choices"][0]["message"]["content"].strip()
 #         except Exception:
@@ -342,117 +325,8 @@
 #     return None
 
 
-# def translate_with_llm(text: str, target_lang: str) -> dict | None:
-#     prompt = f"""
-# Translate the text to {target_lang}.
-# Return ONLY JSON in this exact shape:
-# {{
-#   "translation": "<the translation>",
-#   "romanization": "<latin pronunciation or transliteration, if none is natural, repeat the translation>"
-# }}
-# Text: {text}
-# """.strip()
-
-#     gkey = get_gemini_key()
-#     if gkey:
-#         # try v1 then v1beta
-#         for base in ("https://generativelanguage.googleapis.com/v1", "https://generativelanguage.googleapis.com/v1beta"):
-#             try:
-#                 j = _gemini_generate_content(base, GEMINI_MODEL, gkey, prompt, GEMINI_TIMEOUT)
-#                 if "error" not in j and j.get("candidates"):
-#                     raw = j["candidates"][0]["content"]["parts"][0]["text"].strip()
-#                     try:
-#                         return json.loads(raw)
-#                     except Exception:
-#                         return {"translation": raw, "romanization": ""}
-#             except Exception:
-#                 pass
-
-#     okey = get_openrouter_key()
-#     if okey:
-#         url = "https://openrouter.ai/api/v1/chat/completions"
-#         headers = {
-#             "Content-Type": "application/json",
-#             "Authorization": f"Bearer {okey}",
-#             "HTTP-Referer": "http://localhost",
-#             "X-Title": "olist-genai-agent",
-#         }
-#         body = {
-#             "model": OPENROUTER_MODEL,
-#             "messages": [
-#                 {
-#                     "role": "system",
-#                     "content": "You are a translation assistant. Always return valid JSON with keys 'translation' and 'romanization'.",
-#                 },
-#                 {"role": "user", "content": prompt},
-#             ],
-#             "temperature": 0.0,
-#         }
-#         try:
-#             r = requests.post(url, headers=headers, data=json.dumps(body), timeout=OPENROUTER_TIMEOUT)
-#             j = r.json()
-#             raw = j["choices"][0]["message"]["content"].strip()
-#             try:
-#                 return json.loads(raw)
-#             except Exception:
-#                 return {"translation": raw, "romanization": ""}
-#         except Exception:
-#             pass
-
-#     return {
-#         "translation": text,
-#         "romanization": "pronunciation not available (set GEMINI_API_KEY or OPENROUTER_API_KEY)",
-#     }
-
-
 # # =========================================================
-# # ORDER TRACKING
-# # =========================================================
-
-# def try_track_order(message: str):
-#     m = re.search(r"\b([0-9a-fA-F-]{6,})\b", message)
-#     if not m:
-#         return {
-#             "type": "text",
-#             "content": "I couldn't see an order id there. Say: `where is my order <real-order-id-from-olist>`",
-#         }
-#     order_id = m.group(1)
-#     sql = f"""
-#     SELECT
-#         order_id,
-#         order_status,
-#         order_purchase_timestamp,
-#         order_delivered_customer_date,
-#         order_estimated_delivery_date
-#     FROM orders
-#     WHERE order_id = '{order_id}'
-#     """
-#     try:
-#         df = tools.run_sql(sql)
-#     except Exception:
-#         return {
-#             "type": "text",
-#             "content": f"Mock tracking: order {order_id} is DELIVERED via Correios on 2017-09-18.",
-#         }
-#     if df.empty:
-#         return {
-#             "type": "text",
-#             "content": f"I couldn’t find order `{order_id}` in Olist. It may be a fake/test id.",
-#         }
-#     row = df.iloc[0]
-#     status = row["order_status"]
-#     delivered = row["order_delivered_customer_date"]
-#     eta = row["order_estimated_delivery_date"]
-#     parts = [f"Order `{order_id}` status: **{status}**."]
-#     if delivered:
-#         parts.append(f"Delivered on: {delivered}.")
-#     elif eta:
-#         parts.append(f"Estimated delivery: {eta}.")
-#     return {"type": "text", "content": " ".join(parts)}
-
-
-# # =========================================================
-# # SQL PROMPTS
+# # TRANSLATION, TRACK ORDER – unchanged logic, so skipping to SQL
 # # =========================================================
 
 # def build_base_prompt(user_message: str, schema_text: str) -> str:
@@ -463,11 +337,12 @@
 # {{"sql": "<DUCKDB SQL QUERY>"}}
 
 # Rules:
-# - Dataset is historical (2016–2018). Anchor on (SELECT max(order_purchase_timestamp) FROM orders) for "last N".
-# - For product/category analytics, group by product_category_name_english (or product_category_name) from order_items_enriched JOIN orders.
+# - Always anchor relative periods on (SELECT max(order_purchase_timestamp) FROM orders).
+# - Join order_items_enriched to orders for timestamps.
+# - Group by product_category_name_english for category questions.
 # - Revenue = price + freight_value.
-# - Use DuckDB date_trunc(...) and INTERVAL syntax.
-# - Use only columns/tables that appear in the schema.
+# - Use DuckDB date_trunc and INTERVAL (no CURRENT_TIMESTAMP on 2016-2018 data).
+# - Use only the columns in the schema.
 
 # SCHEMA:
 # {schema_text}
@@ -476,48 +351,21 @@
 # {user_message}
 # """.strip()
 
-
-# def build_correction_prompt(user_message: str, schema_text: str, bad_sql: str, db_error: str) -> str:
-#     return f"""
-# You wrote SQL but DuckDB failed.
-
-# USER QUESTION:
-# {user_message}
-
-# SCHEMA:
-# {schema_text}
-
-# YOUR SQL:
-# {bad_sql}
-
-# ERROR:
-# {db_error}
-
-# Return ONLY:
-# {{"sql": "<FIXED_SQL>"}}
-# """.strip()
-
-
-# # =========================================================
-# # LLM CALLS FOR SQL
-# # =========================================================
 
 # def call_gemini_for_sql(prompt: str):
 #     key = get_gemini_key()
 #     if not key:
 #         return None, "GEMINI_API_KEY not set"
-
-#     # try v1 then v1beta – both very short
-#     v1_err = None
+#     last_err = None
 #     for base in ("https://generativelanguage.googleapis.com/v1", "https://generativelanguage.googleapis.com/v1beta"):
 #         try:
 #             j = _gemini_generate_content(base, GEMINI_MODEL, key, prompt, GEMINI_TIMEOUT)
 #             if "error" not in j:
 #                 return j, None
-#             v1_err = j["error"].get("message", "unknown gemini error")
+#             last_err = j["error"].get("message", "unknown Gemini error")
 #         except Exception as e:
-#             v1_err = str(e)
-#     return None, f"Gemini API error: {v1_err}"
+#             last_err = str(e)
+#     return None, f"Gemini API error: {last_err}"
 
 
 # def parse_gemini_sql(resp: dict):
@@ -536,7 +384,6 @@
 #     key = get_openrouter_key()
 #     if not key:
 #         return None, "OPENROUTER_API_KEY not set"
-
 #     url = "https://openrouter.ai/api/v1/chat/completions"
 #     headers = {
 #         "Content-Type": "application/json",
@@ -578,17 +425,134 @@
 #         return None, f"OpenRouter parse error after repair: {e}"
 #     return None, "OpenRouter JSON has no 'sql'"
 
+# # ===================== TRANSLATION HELPERS =====================
+# def extract_translation_target_and_text(message: str):
+#     """
+#     Supports:
+#       translate to korean: delivered
+#       translate to japanese delivered
+#       translate to mandrian: delivered
+#     Default target: Hindi
+#     """
+#     text = message.strip()
+#     target_lang = "Hindi"
+#     to_translate = text
 
-# # =========================================================
-# # EXPLANATION
-# # =========================================================
+#     lower = text.lower()
+#     if lower.startswith("translate to "):
+#         rest = text[len("translate to ") :].strip()
+#         if ":" in rest:
+#             lang_part, txt = rest.split(":", 1)
+#             target_lang = lang_part.strip()
+#             to_translate = txt.strip()
+#         else:
+#             parts = rest.split(" ", 1)
+#             target_lang = parts[0].strip()
+#             to_translate = parts[1].strip() if len(parts) > 1 else ""
+#     elif lower.startswith("translate "):
+#         # e.g. "translate delivered" → default lang
+#         to_translate = text[len("translate ") :].strip()
+
+#     # fix common misspells / shortcuts
+#     low_lang = target_lang.lower()
+#     if low_lang in ("mandrian", "mandarin"):
+#         target_lang = "Mandarin Chinese"
+#     if low_lang in ("pt", "pt-br", "brazilian portuguese"):
+#         target_lang = "Portuguese (Brazil)"
+
+#     return target_lang, to_translate
+
+
+# def translate_with_llm(text: str, target_lang: str) -> dict:
+#     """
+#     Try Gemini (v1 -> v1beta), then OpenRouter.
+#     On ANY failure, return a safe fallback so the backend never 500s.
+#     """
+#     prompt = f"""
+# Translate the text to {target_lang}.
+# Return ONLY JSON in this exact shape:
+# {{
+#   "translation": "<the translation>",
+#   "romanization": "<latin pronunciation or transliteration, if none is natural, repeat the translation>"
+# }}
+# Text: {text}
+# """.strip()
+
+#     gkey = get_gemini_key()
+#     if gkey:
+#         for base in (
+#             "https://generativelanguage.googleapis.com/v1",
+#             "https://generativelanguage.googleapis.com/v1beta",
+#         ):
+#             try:
+#                 j = _gemini_generate_content(
+#                     base, GEMINI_MODEL, gkey, prompt, GEMINI_TIMEOUT
+#                 )
+#                 if isinstance(j, dict) and "error" in j:
+#                     continue
+#                 if (
+#                     isinstance(j, dict)
+#                     and j.get("candidates")
+#                     and j["candidates"][0]["content"]["parts"]
+#                 ):
+#                     raw = j["candidates"][0]["content"]["parts"][0]["text"].strip()
+#                     try:
+#                         return json.loads(raw)
+#                     except Exception:
+#                         return {"translation": raw, "romanization": ""}
+#             except Exception:
+#                 # swallow and try next provider
+#                 pass
+
+#     okey = get_openrouter_key()
+#     if okey:
+#         try:
+#             url = "https://openrouter.ai/api/v1/chat/completions"
+#             headers = {
+#                 "Content-Type": "application/json",
+#                 "Authorization": f"Bearer {okey}",
+#                 "HTTP-Referer": "http://localhost",
+#                 "X-Title": "olist-genai-agent",
+#             }
+#             body = {
+#                 "model": OPENROUTER_MODEL,
+#                 "messages": [
+#                     {
+#                         "role": "system",
+#                         "content": "You are a translation assistant. Always return valid JSON with keys 'translation' and 'romanization'.",
+#                     },
+#                     {"role": "user", "content": prompt},
+#                 ],
+#                 "temperature": 0.0,
+#             }
+#             r = requests.post(
+#                 url,
+#                 headers=headers,
+#                 data=json.dumps(body),
+#                 timeout=OPENROUTER_TIMEOUT,
+#             )
+#             j = r.json()
+#             raw = j["choices"][0]["message"]["content"].strip()
+#             try:
+#                 return json.loads(raw)
+#             except Exception:
+#                 return {"translation": raw, "romanization": ""}
+#         except Exception:
+#             pass
+
+#     # fallback – must never crash the API
+#     return {
+#         "translation": text,
+#         "romanization": "pronunciation not available (LLM call failed)",
+#     }
+
 
 # def build_explanation(user_message: str, sql: str, extra: str | None = None) -> str:
 #     msg = user_message.lower()
 #     parts = []
 #     if "category" in msg or "product" in msg:
 #         parts.append("I treated it as a category-level question and used item-level tables joined to orders.")
-#     if any(x in msg for x in ["last", "past", "quarter", "month"]):
+#     if any(x in msg for x in ["last", "past", "quarter", "month", "day"]):
 #         parts.append("I anchored the time window on the latest order_purchase_timestamp in the dataset.")
 #     if "top" in msg or "highest" in msg:
 #         parts.append("I ordered the aggregated values descending to surface the top entries.")
@@ -599,6 +563,23 @@
 #     parts.append("You can modify the SQL below to explore further.")
 #     return " ".join(parts)
 
+# def get_last_sql_from_history(history: list[str | dict]) -> str | None:
+#     """
+#     History from frontend is a list of dicts with role/content.
+#     We only care about assistant messages that had SQL in them.
+#     """
+#     if not history:
+#         return None
+#     # history is list of dicts like {"role": "assistant", "content": "..."}
+#     # but our assistant responses in frontend are wrapped; so we just scan strings
+#     for msg in reversed(history):
+#         if not isinstance(msg, dict):
+#             continue
+#         content = msg.get("content", "")
+#         # crude: if there's a SELECT in it, treat it as SQL
+#         if "SELECT" in content.upper():
+#             return content
+#     return None
 
 # # =========================================================
 # # MAIN HANDLER
@@ -607,77 +588,67 @@
 # def handle_user_message(message: str, history: list):
 #     intent = detect_intent(message)
 
-#     # definitions
+#     # --- definitions ---
 #     if intent == "definition":
 #         term = extract_definition_term(message)
-
-#         # 1) if it's a known Olist column/term, keep using the local glossary
+#         # 1) local
 #         if term in tools.COLUMN_DEFS:
 #             return {"type": "text", "content": tools.explain_column(term)}
-
-#         # 2) try LLM for unknown terms like "invoice"
+#         # 2) LLM
 #         llm_def = call_llm_for_definition(term, message)
 #         if llm_def:
 #             return {"type": "text", "content": llm_def}
-
-#         # 3) last resort: honest fallback, no fake "order_status"
+#         # 3) honest fallback
 #         return {
 #             "type": "text",
-#             "content": f"I don’t have a stored definition for '{term}'. Try asking it differently, e.g. 'what is invoice in Olist payments?'.",
+#             "content": f"I don't have a stored definition for '{term}'. Try asking it with more dataset context.",
 #         }
 
-
-#     # translation
+#     # --- translation / order tracking kept as in your previous version ---
 #     if intent == "translate":
 #         target_lang, to_translate = extract_translation_target_and_text(message)
 #         data = translate_with_llm(to_translate, target_lang)
 #         translation = data.get("translation", "").strip()
-#         romanization = data.get("romanization", "").strip()
-#         if not romanization:
-#             romanization = "pronunciation not available"
+#         romanization = data.get("romanization", "").strip() or "pronunciation not available"
 #         return {"type": "text", "content": f"{translation} ({romanization})"}
 
-#     # order tracking
+
 #     if intent == "track_order":
 #         return try_track_order(message)
 
-#     # SQL path
+#     # --- SQL path ---
 #     schema = tools.get_schema_summary()
 #     schema_text = "\n".join([f"{t}: {', '.join(cols)}" for t, cols in schema.items()])
 #     base_prompt = build_base_prompt(message, schema_text)
 
 #     sql = None
-#     errors = []
+#     errs = []
 
-#     # 1) Gemini (fast fail)
 #     g_resp, g_err = call_gemini_for_sql(base_prompt)
 #     if g_resp is not None and g_err is None:
-#         sql, parse_err = parse_gemini_sql(g_resp)
-#         if parse_err:
-#             errors.append(parse_err)
+#         sql, p_err = parse_gemini_sql(g_resp)
+#         if p_err:
+#             errs.append(p_err)
 #     else:
 #         if g_err:
-#             errors.append(g_err)
+#             errs.append(g_err)
 
-#     # 2) OpenRouter (short timeout, model auto-downgraded)
 #     if sql is None:
 #         o_resp, o_err = call_openrouter_for_sql(base_prompt)
 #         if o_resp is not None and o_err is None:
-#             sql, parse_err = parse_openrouter_sql(o_resp)
-#             if parse_err:
-#                 errors.append(parse_err)
+#             sql, p_err = parse_openrouter_sql(o_resp)
+#             if p_err:
+#                 errs.append(p_err)
 #         else:
 #             if o_err:
-#                 errors.append(o_err)
+#                 errs.append(o_err)
 
-#     # nothing worked → return fast (so Streamlit doesn’t time out)
 #     if sql is None:
 #         return {
 #             "type": "error",
-#             "error": " | ".join(errors) if errors else "No LLM produced SQL.",
+#             "error": " | ".join(errs) if errs else "No LLM produced SQL.",
 #         }
 
-#     # clean + run
 #     sql = relax_overstrict_date_filter(message, sql)
 #     sql = sanitize_sql(sql)
 #     sql = normalize_duckdb_intervals(sql)
@@ -690,57 +661,22 @@
 #         df = df.replace({math.nan: None, float("inf"): None, float("-inf"): None})
 #         rows = rows_to_jsonable(df.head(200).to_dict(orient="records"))
 #         extra = None
-#         if "category" in message.lower() or "product" in message.lower():
-#             extra = tools.get_category_facts(message)
-#         return {
-#             "type": "table",
-#             "sql": sql,
-#             "data": rows,
-#             "explanation": build_explanation(message, sql, extra),
-#         }
+#         if "category" in message.lower():
+#             extra_info = tools.fake_external_lookup(message)
+#             return {
+#                 "type": "table",
+#                 "sql": sql,
+#                 "data": rows,
+#                 "explanation": build_explanation(message, sql, extra_info),
+#             }
+
 #     except Exception as db_err:
-#         # correction pass
-#         corr_prompt = build_correction_prompt(message, schema_text, sql, str(db_err))
-
-#         fixed_sql = None
-#         g2, g2_err = call_gemini_for_sql(corr_prompt)
-#         if g2 is not None and g2_err is None:
-#             fixed_sql, _ = parse_gemini_sql(g2)
-
-#         if fixed_sql is None:
-#             o2, o2_err = call_openrouter_for_sql(corr_prompt)
-#             if o2 is not None and o2_err is None:
-#                 fixed_sql, _ = parse_openrouter_sql(o2)
-
-#         if fixed_sql:
-#             fixed_sql = relax_overstrict_date_filter(message, fixed_sql)
-#             fixed_sql = sanitize_sql(fixed_sql)
-#             fixed_sql = fix_cte_column_usage(fixed_sql)
-#             fixed_sql = rebind_unknown_columns(fixed_sql)
-#             fixed_sql = fix_obviously_bad_window(fixed_sql)
-#             try:
-#                 df2 = tools.run_sql(fixed_sql)
-#                 df2 = df2.replace({math.nan: None, float("inf"): None, float("-inf"): None})
-#                 rows2 = rows_to_jsonable(df2.head(200).to_dict(orient="records"))
-#                 return {
-#                     "type": "table",
-#                     "sql": fixed_sql,
-#                     "data": rows2,
-#                     "explanation": build_explanation(message, fixed_sql),
-#                 }
-#             except Exception as e2:
-#                 return {
-#                     "type": "error",
-#                     "error": f"DB error even after correction: {e2}",
-#                     "sql": fixed_sql,
-#                 }
-
 #         return {
 #             "type": "error",
 #             "error": f"DB error running generated SQL: {db_err}",
 #             "sql": sql,
 #         }
-
+    
 import os
 import json
 import math
@@ -764,7 +700,7 @@ def _normalize_openrouter_model(raw: str | None) -> str:
     if not raw:
         return "google/gemma-2-9b-it"
     low = raw.lower()
-    # auto-downsize huge models so we don't blow streamlit's 12s
+    # downsize huge models so we don't blow the 12s frontend timeout
     if "70b" in low or "405b" in low or "72b" in low:
         return "google/gemma-2-9b-it"
     return raw.strip()
@@ -799,14 +735,6 @@ def rows_to_jsonable(rows):
 
 
 def relax_overstrict_date_filter(user_message: str, sql: str) -> str:
-    """
-    LLMs often generate filters like:
-      WHERE o.order_purchase_timestamp = (SELECT max(...) FROM orders)
-    or
-      WHERE ... = (SELECT last_order_date FROM last_order)
-    which returns 0 rows on Olist. Strip them unless the user explicitly asked
-    for "today/recent/past/last".
-    """
     if not sql:
         return sql
 
@@ -815,7 +743,6 @@ def relax_overstrict_date_filter(user_message: str, sql: str) -> str:
     if wants_recent:
         return sql
 
-    # drop exact-timestamp filters
     sql = re.sub(
         r"WHERE\s+[A-Za-z0-9_]+\.\s*order_purchase_timestamp\s*=\s*\(SELECT\s+MAX\(order_purchase_timestamp\)\s+FROM\s+orders\)",
         "",
@@ -961,8 +888,10 @@ SELECT
     (SELECT revenue FROM last3) AS last_3_months_revenue,
     (SELECT revenue FROM prev3) AS previous_3_months_revenue;
 """.strip()
+
+
 # =========================================================
-# INTENT (fixed)
+# INTENT
 # =========================================================
 
 ANALYTIC_HINTS = [
@@ -980,11 +909,8 @@ def looks_analytic(message: str) -> bool:
 
 def detect_intent(message: str) -> str:
     m = message.lower().strip()
-
-    # normalize apostrophes so "what’s" and "what's" behave the same
     m = m.replace("’", "'")
 
-    # if it starts with "what" AND looks analytic → go to SQL
     if m.startswith("what") and looks_analytic(m):
         return "sql_query"
 
@@ -1000,17 +926,16 @@ def detect_intent(message: str) -> str:
     return "sql_query"
 
 
+# =========================================================
+# DEFINITION HELPERS
+# =========================================================
 
-# =========================================================
-# DEFINITION HELPERS (LLM-backed)
-# =========================================================
 def extract_definition_term(message: str) -> str:
     m = message.strip().lower().replace("’", "'")
     m = re.sub(r"^what\s+is\s+", "", m)
     m = re.sub(r"^what's\s+", "", m)
     m = re.sub(r"^definition of\s+", "", m)
     return m.strip(" ?.")
-
 
 
 def _gemini_generate_content(base_url: str, model: str, key: str, prompt: str, timeout: float):
@@ -1068,7 +993,150 @@ USER ASKED: "{original_message}"
 
 
 # =========================================================
-# TRANSLATION, TRACK ORDER – unchanged logic, so skipping to SQL
+# ORDER TRACKING
+# =========================================================
+
+def try_track_order(message: str):
+    m = re.search(r"\b([0-9a-fA-F-]{6,})\b", message)
+    if not m:
+        return {
+            "type": "text",
+            "content": "I couldn't see an order id there. Say: `where is my order <real-order-id-from-olist>`",
+        }
+    order_id = m.group(1)
+    sql = f"""
+    SELECT
+        order_id,
+        order_status,
+        order_purchase_timestamp,
+        order_delivered_customer_date,
+        order_estimated_delivery_date
+    FROM orders
+    WHERE order_id = '{order_id}'
+    """
+    try:
+        df = tools.run_sql(sql)
+    except Exception:
+        return {
+            "type": "text",
+            "content": f"Mock tracking: order {order_id} is DELIVERED.",
+        }
+    if df.empty:
+        return {
+            "type": "text",
+            "content": f"I couldn’t find order `{order_id}` in Olist. It may be a fake/test id.",
+        }
+    row = df.iloc[0]
+    status = row["order_status"]
+    delivered = row["order_delivered_customer_date"]
+    eta = row["order_estimated_delivery_date"]
+    parts = [f"Order `{order_id}` status: **{status}**."]
+    if delivered:
+        parts.append(f"Delivered on: {delivered}.")
+    elif eta:
+        parts.append(f"Estimated delivery: {eta}.")
+    return {"type": "text", "content": " ".join(parts)}
+
+
+# =========================================================
+# TRANSLATION
+# =========================================================
+
+def extract_translation_target_and_text(message: str):
+    text = message.strip()
+    target_lang = "Hindi"
+    to_translate = text
+
+    lower = text.lower()
+    if lower.startswith("translate to "):
+        rest = text[len("translate to "):].strip()
+        if ":" in rest:
+            lang_part, txt = rest.split(":", 1)
+            target_lang = lang_part.strip()
+            to_translate = txt.strip()
+        else:
+            parts = rest.split(" ", 1)
+            target_lang = parts[0].strip()
+            to_translate = parts[1].strip() if len(parts) > 1 else ""
+    elif lower.startswith("translate "):
+        to_translate = text[len("translate "):].strip()
+
+    low_lang = target_lang.lower()
+    if low_lang in ("mandrian", "mandarin"):
+        target_lang = "Mandarin Chinese"
+    if low_lang in ("pt", "pt-br", "brazilian portuguese"):
+        target_lang = "Portuguese (Brazil)"
+
+    return target_lang, to_translate
+
+
+def translate_with_llm(text: str, target_lang: str) -> dict:
+    prompt = f"""
+Translate the text to {target_lang}.
+Return ONLY JSON in this exact shape:
+{{
+  "translation": "<the translation>",
+  "romanization": "<latin pronunciation or transliteration, if none is natural, repeat the translation>"
+}}
+Text: {text}
+""".strip()
+
+    gkey = get_gemini_key()
+    if gkey:
+        for base in ("https://generativelanguage.googleapis.com/v1",
+                     "https://generativelanguage.googleapis.com/v1beta"):
+            try:
+                j = _gemini_generate_content(base, GEMINI_MODEL, gkey, prompt, GEMINI_TIMEOUT)
+                if isinstance(j, dict) and "error" in j:
+                    continue
+                if isinstance(j, dict) and j.get("candidates"):
+                    raw = j["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    try:
+                        return json.loads(raw)
+                    except Exception:
+                        return {"translation": raw, "romanization": ""}
+            except Exception:
+                pass
+
+    okey = get_openrouter_key()
+    if okey:
+        try:
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {okey}",
+                "HTTP-Referer": "http://localhost",
+                "X-Title": "olist-genai-agent",
+            }
+            body = {
+                "model": OPENROUTER_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a translation assistant. Always return valid JSON with keys 'translation' and 'romanization'.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.0,
+            }
+            r = requests.post(url, headers=headers, data=json.dumps(body), timeout=OPENROUTER_TIMEOUT)
+            j = r.json()
+            raw = j["choices"][0]["message"]["content"].strip()
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"translation": raw, "romanization": ""}
+        except Exception:
+            pass
+
+    return {
+        "translation": text,
+        "romanization": "pronunciation not available (LLM call failed)",
+    }
+
+
+# =========================================================
+# LLM → SQL
 # =========================================================
 
 def build_base_prompt(user_message: str, schema_text: str) -> str:
@@ -1083,7 +1151,7 @@ Rules:
 - Join order_items_enriched to orders for timestamps.
 - Group by product_category_name_english for category questions.
 - Revenue = price + freight_value.
-- Use DuckDB date_trunc and INTERVAL (no CURRENT_TIMESTAMP on 2016-2018 data).
+- Use DuckDB date_trunc and INTERVAL.
 - Use only the columns in the schema.
 
 SCHEMA:
@@ -1167,127 +1235,10 @@ def parse_openrouter_sql(resp: dict):
         return None, f"OpenRouter parse error after repair: {e}"
     return None, "OpenRouter JSON has no 'sql'"
 
-# ===================== TRANSLATION HELPERS =====================
-def extract_translation_target_and_text(message: str):
-    """
-    Supports:
-      translate to korean: delivered
-      translate to japanese delivered
-      translate to mandrian: delivered
-    Default target: Hindi
-    """
-    text = message.strip()
-    target_lang = "Hindi"
-    to_translate = text
 
-    lower = text.lower()
-    if lower.startswith("translate to "):
-        rest = text[len("translate to ") :].strip()
-        if ":" in rest:
-            lang_part, txt = rest.split(":", 1)
-            target_lang = lang_part.strip()
-            to_translate = txt.strip()
-        else:
-            parts = rest.split(" ", 1)
-            target_lang = parts[0].strip()
-            to_translate = parts[1].strip() if len(parts) > 1 else ""
-    elif lower.startswith("translate "):
-        # e.g. "translate delivered" → default lang
-        to_translate = text[len("translate ") :].strip()
-
-    # fix common misspells / shortcuts
-    low_lang = target_lang.lower()
-    if low_lang in ("mandrian", "mandarin"):
-        target_lang = "Mandarin Chinese"
-    if low_lang in ("pt", "pt-br", "brazilian portuguese"):
-        target_lang = "Portuguese (Brazil)"
-
-    return target_lang, to_translate
-
-
-def translate_with_llm(text: str, target_lang: str) -> dict:
-    """
-    Try Gemini (v1 -> v1beta), then OpenRouter.
-    On ANY failure, return a safe fallback so the backend never 500s.
-    """
-    prompt = f"""
-Translate the text to {target_lang}.
-Return ONLY JSON in this exact shape:
-{{
-  "translation": "<the translation>",
-  "romanization": "<latin pronunciation or transliteration, if none is natural, repeat the translation>"
-}}
-Text: {text}
-""".strip()
-
-    gkey = get_gemini_key()
-    if gkey:
-        for base in (
-            "https://generativelanguage.googleapis.com/v1",
-            "https://generativelanguage.googleapis.com/v1beta",
-        ):
-            try:
-                j = _gemini_generate_content(
-                    base, GEMINI_MODEL, gkey, prompt, GEMINI_TIMEOUT
-                )
-                if isinstance(j, dict) and "error" in j:
-                    continue
-                if (
-                    isinstance(j, dict)
-                    and j.get("candidates")
-                    and j["candidates"][0]["content"]["parts"]
-                ):
-                    raw = j["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    try:
-                        return json.loads(raw)
-                    except Exception:
-                        return {"translation": raw, "romanization": ""}
-            except Exception:
-                # swallow and try next provider
-                pass
-
-    okey = get_openrouter_key()
-    if okey:
-        try:
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {okey}",
-                "HTTP-Referer": "http://localhost",
-                "X-Title": "olist-genai-agent",
-            }
-            body = {
-                "model": OPENROUTER_MODEL,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a translation assistant. Always return valid JSON with keys 'translation' and 'romanization'.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.0,
-            }
-            r = requests.post(
-                url,
-                headers=headers,
-                data=json.dumps(body),
-                timeout=OPENROUTER_TIMEOUT,
-            )
-            j = r.json()
-            raw = j["choices"][0]["message"]["content"].strip()
-            try:
-                return json.loads(raw)
-            except Exception:
-                return {"translation": raw, "romanization": ""}
-        except Exception:
-            pass
-
-    # fallback – must never crash the API
-    return {
-        "translation": text,
-        "romanization": "pronunciation not available (LLM call failed)",
-    }
-
+# =========================================================
+# EXPLANATION
+# =========================================================
 
 def build_explanation(user_message: str, sql: str, extra: str | None = None) -> str:
     msg = user_message.lower()
@@ -1306,6 +1257,19 @@ def build_explanation(user_message: str, sql: str, extra: str | None = None) -> 
     return " ".join(parts)
 
 
+# small history helper (for future contextual rewrites)
+def get_last_sql_from_history(history: list) -> str | None:
+    if not history:
+        return None
+    for msg in reversed(history):
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content", "")
+        if "SELECT" in content.upper():
+            return content
+    return None
+
+
 # =========================================================
 # MAIN HANDLER
 # =========================================================
@@ -1313,23 +1277,20 @@ def build_explanation(user_message: str, sql: str, extra: str | None = None) -> 
 def handle_user_message(message: str, history: list):
     intent = detect_intent(message)
 
-    # --- definitions ---
+    # 1) definition
     if intent == "definition":
         term = extract_definition_term(message)
-        # 1) local
         if term in tools.COLUMN_DEFS:
             return {"type": "text", "content": tools.explain_column(term)}
-        # 2) LLM
         llm_def = call_llm_for_definition(term, message)
         if llm_def:
             return {"type": "text", "content": llm_def}
-        # 3) honest fallback
         return {
             "type": "text",
-            "content": f"I don’t have a stored definition for '{term}'. Try asking it with more dataset context.",
+            "content": f"I don't have a stored definition for '{term}'. Try asking it with more dataset context.",
         }
 
-    # --- translation / order tracking kept as in your previous version ---
+    # 2) translation
     if intent == "translate":
         target_lang, to_translate = extract_translation_target_and_text(message)
         data = translate_with_llm(to_translate, target_lang)
@@ -1337,11 +1298,11 @@ def handle_user_message(message: str, history: list):
         romanization = data.get("romanization", "").strip() or "pronunciation not available"
         return {"type": "text", "content": f"{translation} ({romanization})"}
 
-
+    # 3) order tracking
     if intent == "track_order":
         return try_track_order(message)
 
-    # --- SQL path ---
+    # 4) analytics / SQL
     schema = tools.get_schema_summary()
     schema_text = "\n".join([f"{t}: {', '.join(cols)}" for t, cols in schema.items()])
     base_prompt = build_base_prompt(message, schema_text)
@@ -1370,8 +1331,8 @@ def handle_user_message(message: str, history: list):
 
     if sql is None:
         return {
-            "type": "error",
-            "error": " | ".join(errs) if errs else "No LLM produced SQL.",
+            "type": "text",
+            "content": "I couldn’t generate SQL for that with the current models. Try clarifying the table/time window.",
         }
 
     sql = relax_overstrict_date_filter(message, sql)
@@ -1385,9 +1346,12 @@ def handle_user_message(message: str, history: list):
         df = tools.run_sql(sql)
         df = df.replace({math.nan: None, float("inf"): None, float("-inf"): None})
         rows = rows_to_jsonable(df.head(200).to_dict(orient="records"))
+
+        # add extra info for category questions
         extra = None
-        if "category" in message.lower() or "product" in message.lower():
-            extra = tools.get_category_facts(message)
+        if "category" in message.lower():
+            extra = tools.fake_external_lookup(message)
+
         return {
             "type": "table",
             "sql": sql,
