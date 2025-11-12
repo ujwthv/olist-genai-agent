@@ -1,0 +1,10 @@
+services:
+  olist-app:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    env_file:
+      - ./backend/.env        # your .env lives inside backend
+    volumes:
+      - ./data:/app/data      # <— this is the important line
