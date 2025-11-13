@@ -1,58 +1,28 @@
+NEXT STEPS (PRIORITIZED)
+========================
 
----
+1) Semantic Layer + Metrics Registry
+   - Introduce a thin semantic layer (YAML/JSON) that defines canonical metrics (e.g., AOV, revenue, repeat_rate), dimensions (customer_state, category), and time grains.
+   - Force LLMs to target metrics by name → generate stable, lintable SQL via templates.
+   - Benefit: stop bikeshedding metric definitions; fewer SQL bugs; faster iteration.
 
-## `future_improvements.txt`
+2) Multi-Turn SQL Refinement with Diffs
+   - Keep the last successful SQL per chat; on follow-ups, generate a patch (diff) rather than fresh SQL.
+   - Show a small “SQL diff” panel so users see exactly what changed.
+   - Benefit: reduces hallucinations and preserves analyst intent across iterative questions.
 
-```text
-FUTURE IMPROVEMENTS / NEXT STEPS
-================================
+3) Result Quality Gates + Golden Tests
+   - Create a small suite of “golden queries” with expected row counts, schema, and simple invariants (e.g., no negative freight).
+   - Auto-run after each LLM SQL generation; if a gate fails → trigger correction prompt before the user sees it.
+   - Benefit: fewer embarrassing zero-row/garbage answers; measurable reliability.
 
-1. Better intent classification
-   - Right now we use rule-based checks (starts with "what", has "average", "by", etc.)
-   - Replace with a small classifier that looks at length, presence of schema terms, and "time window" words.
-   - Goal: never send analytic questions to the definition branch.
+4) Real RAG for Product Knowledge
+   - Replace `fake_external_lookup` with a vector index over product catalog, help-center docs, and category glossaries.
+   - Hybrid search (BM25 + dense) with source citations; retrieved facts are injected as system context for SQL generation.
+   - Benefit: deeper category insights, grounded definitions, less LLM waffle.
 
-2. Smarter date-window rewriting
-   - LLM often produces "WHERE order_purchase_timestamp = (SELECT max(...))" which kills the result.
-   - We already strip some of these, but we can:
-     - detect historic datasets (like Olist 2016–2018),
-     - rewrite "last 90 days" → "max_ts - interval 90 day" over that historic max.
-
-3. Model discovery / health check
-   - At startup, call Gemini "list models" and/or OpenRouter "models" to verify the configured model exists.
-   - If it doesn't, auto-pick a known-fast model.
-   - Expose this on `/debug-env`.
-
-4. Caching layer
-   - Many users will ask the same NL question ("orders per month", "top categories") repeatedly.
-   - Cache NL → SQL and SQL → result for a short TTL to avoid repeated LLM calls.
-
-5. RAG for definitions
-   - Instead of asking the LLM, index an internal Olist data dictionary.
-   - If term not in local glossary, search the RAG index first, only then call LLM.
-   - This makes "what is invoice" and "what is freight_value" more deterministic.
-
-6. SQL validation / linting
-   - After LLM generates SQL, run a quick DuckDB "EXPLAIN" or "DESCRIBE" to detect missing tables/columns.
-   - If it's clearly broken, auto-send a correction prompt without returning an error to the UI.
-
-7. UI improvements
-   - If query has a time dimension → auto-plot.
-   - If query returns >= 2 numeric columns → offer "download CSV".
-   - Add "show SQL" toggle instead of always showing code.
-
-8. Auth / multi-tenant
-   - Right now it’s single-user, no auth.
-   - Add a simple API key or JWT in FastAPI to control access.
-   - Store user-level history separately so LLM can see previous context per user.
-
-9. Packaging
-   - Split backend into modules: intents/, llm/, sql_fixes/, handlers/.
-   - Add unit tests for:
-     - translation fallback
-     - intent detection
-     - SQL post-processing
-
-10. Deployment
-    - Add production Dockerfile (multi-stage, gunicorn/uvicorn worker).
-    - Add GitHub Actions to run tests + build image on push.
+5) Observability + Guardrails in Prod
+   - Add structured logs (query text, model used, latency, cache hit, SQL len, row count), plus Prometheus metrics and simple dashboards.
+   - Circuit breakers: back off Gemini/OpenRouter on sustained errors; auto-switch models; raise UI banner.
+   - PII scrubber for logs; redact order_ids by default (toggleable for admins).
+   - Benefit: you’ll actually know when/why it breaks—and you won’t leak data.
